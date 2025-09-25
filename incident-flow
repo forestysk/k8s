@@ -1,0 +1,50 @@
+[障害検知]
+   │
+   ▼
+[影響範囲を確認]
+   │
+   ├─ 特定のアプリのみ影響？
+   │        │
+   │        ├─ Yes ─→ [アプリ層調査]
+   │        │            │
+   │        │            ├─ Podログ確認 (`kubectl logs`)
+   │        │            ├─ Deployment/ReplicaSet/Job 状態確認
+   │        │            ├─ ConfigMap/Secret 設定内容確認
+   │        │            ├─ イメージ更新・差し替え履歴確認
+   │        │            └─ Liveness/Readiness Probe の失敗有無
+   │        │
+   │        └─ No ─→ [クラスタ全体調査へ]
+   │
+   └─ 複数アプリ/クラスタ全体に影響
+            │
+            ▼
+      [クラスタ全体調査 (k8sレイヤー)]
+            │
+            ├─ ノード状態確認 (`kubectl get nodes`)
+            │        ├─ NotReadyあり？ → [Node/kubelet調査]
+            │        │                       ├─ kubeletログ / container runtime状態
+            │        │                       ├─ OSリソース不足確認
+            │        │                       └─ CNI調査
+            │        └─ 全部Ready → 次へ
+            │
+            ├─ Pod状態確認 (`kubectl get pods -A`)
+            │        ├─ Pending/CrashLoopBackOff あり？
+            │        │        ├─ Yes → [スケジューリング/リソース/イメージ調査]
+            │        │        └─ No  → 次へ
+            │
+            ├─ イベント確認 (`kubectl get events -A`)
+            │        ├─ エラーイベントあり？ → [リソース不足/ネットワーク/ストレージ調査]
+            │        └─ 無し → 次へ
+            │
+            └─ Control Plane調査
+                     ├─ API Server / Scheduler / Controller Manager ログ確認
+                     ├─ etcd 健全性 (`etcdctl endpoint health`)
+                     └─ クラスタ構成の変更履歴確認
+            │
+            ▼
+      [OS/基盤調査]
+            ├─ CPU/メモリ/ディスク/プロセス状態
+            ├─ OOM-killer発生有無 (`dmesg | grep -i oom`)
+            ├─ ネットワークインタフェース/ルーティング
+            ├─ Pod間疎通 (ping, curl, netcat)
+            └─ ストレージ状態 (PV/PVC, CSIログ)
