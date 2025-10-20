@@ -1,0 +1,7 @@
+障害検知
+  ↓
+初期確認
+  ├─ Node 異常 → Node深掘り
+  ├─ Control Plane 異常 → Controller / API Server深掘り
+  ├─ etcd 異常 → etcd深掘り
+  └─ それらが正常 → Pod/Workload深掘り
