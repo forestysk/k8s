@@ -1,0 +1,27 @@
+sequenceDiagram
+    participant Kubelet
+    participant API_Server as kube-apiserver
+    participant CtrlMgr as kube-controller-manager
+
+    Note over Kubelet: node-lease-renew-interval=3s<br>node-status-update-frequency=10s
+    Note over CtrlMgr: node-monitor-period=5s<br>node-monitor-grace-period=15s
+
+    loop 毎3秒 (Lease更新)
+        Kubelet->>API_Server: PATCH /apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/<node>
+        Note right of API_Server: renewTime 更新<br>(etcdへ反映)
+    end
+
+    loop 毎10秒 (NodeStatus更新)
+        Kubelet->>API_Server: PATCH /api/v1/nodes/<node> (status更新)
+        Note right of API_Server: Node.status.conditions 更新
+    end
+
+    loop 毎5秒 (監視)
+        CtrlMgr->>API_Server: GET /apis/coordination.k8s.io/v1/.../leases/<node>
+        API_Server-->>CtrlMgr: return renewTime
+        alt renewTime が 15s 以内
+            CtrlMgr->>CtrlMgr: Node 状態 = Ready
+        else renewTime が 15s 超過
+            CtrlMgr->>CtrlMgr: Node 状態 = NotReady
+        end
+    end
