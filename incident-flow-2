@@ -1,0 +1,86 @@
+flowchart TD
+  A[障害検知 / 通報] --> B[初期確認コマンド実行]
+  B -->|実行| C{{"kubectl get nodes の結果に異常?"}}
+  B -->|並行| D{{"クラスタ系のステータスに異常?"}}
+  B -->|並行| E{{"etcd 健全性に異常?"}}
+  B -->|補助| F["補助確認: kubectl get pods -A / get events -A / kube-systemのPod"]
+
+  %% 初期コマンド
+  B --> B1["kubectl get nodes"]
+  B --> B2["kubectl get pods -A --field-selector=status.phase!=Running"]
+  B --> B3["kubectl get events -A --sort-by=.metadata.creationTimestamp | tail -n 50"]
+  B --> B4["kubectl cluster-info"]
+  B --> B5["kubectl -n kube-system get pods -o wide"]
+  B --> B6["kubectl get --raw /healthz || true"]
+  B --> B7["(埋め込みetcd) etcdctl endpoint health / status / member list"]
+
+  %% Node分岐
+  C -->|Yes| N0["Node深掘り"]
+  C -->|No| D
+  N0 --> N1{{"NotReady/Unknown のNodeがある?"}}
+  N1 -->|Yes| N2["kubectl describe node <node>"]
+  N1 -->|No| D
+  N2 --> N3["kubelet状態: systemctl status kubelet; journalctl -u kubelet --since -2h"]
+  N3 --> N4["container runtime: crictl ps; systemctl status containerd/docker"]
+  N4 --> N5["OSリソース: top, free -h, df -h, dmesg | grep -i oom"]
+  N5 --> N6{{"CNI/ネットワーク異常あり?"}}
+  N6 -->|Yes| N7["flannel Podログ / ip route / arp -n"]
+  N6 -->|No| N8{{"時計ずれやFD枯渇?"}}
+  N8 -->|Yes| N9["lsof +L1, timedatectl, chronyc sources"]
+  N8 -->|No| N10["Node Taint/Cond 確認 → スケジューリング調査へ"]
+
+  %% Control Plane
+  D -->|Yes| CP0["Control Plane 深掘り"]
+  D -->|No| E
+  CP0 --> CP1{{"kube-system に CrashLoop / Pending あり?"}}
+  CP1 -->|Yes| CP2["kubectl describe / logs でエラー特定"]
+  CP1 -->|No| CP4{{"/healthz 不調?"}}
+  CP2 --> CP3{{"apiserver / scheduler / controller どれ?"}}
+  CP3 -->|apiserver| AP1["journalctl -u kube-apiserver --since -2h"]
+  CP3 -->|scheduler| SC1["journalctl -u kube-scheduler"]
+  CP3 -->|controller| CM1["journalctl -u kube-controller-manager"]
+  CP4 -->|Yes| AP1
+  CP4 -->|No| E
+
+  %% etcd
+  E -->|Yes| ET0["etcd 深掘り"]
+  E -->|No| G{{"Pod / Workload の異常?"}}
+  ET0 --> ET1["etcdctl endpoint health / status / alarm list"]
+  ET1 --> ET2{{"Leader不安定 or Raft遅延?"}}
+  ET2 -->|Yes| ET3["ping, mtr, iostat, fsync latency 確認"]
+  ET2 -->|No| ET6["証明書期限, 時刻ずれ, 権限確認"]
+  ET3 --> ET4["DBサイズ確認 → defrag検討"]
+  ET4 --> G
+  ET6 --> G
+
+  %% Workload & Pod 深掘り
+  G -->|Yes| W0["Pod / Workload 深掘り"]
+  G -->|No| H["一時事象 or 監視閾値確認"]
+
+  W0 --> W1{{"PodがCrashLoop / ErrImagePull?"}}
+  W1 -->|Yes| P0["Pod深掘り"]
+  W1 -->|No| W4{{"PodがPending?"}}
+  W4 -->|Yes| W5["Eventsで理由特定: リソース/ノード選好/PV未バインド"]
+  W4 -->|No| W7{{"Service/DNS疎通不良?"}}
+
+  %% Pod深掘り詳細
+  P0 --> P1["kubectl describe pod <name>"]
+  P0 --> P2["kubectl logs <name> --previous"]
+  P0 --> P3["kubectl exec -it <pod> -- env / ps aux"]
+  P0 --> P4["kubectl get events --field-selector involvedObject.name=<pod>"]
+  P0 --> P5["requests/limits, probe設定, volume mount"]
+  P0 --> P6["ConfigMap, Secret, イメージ破損, 権限問題"]
+  P0 --> W3["結果整理・恒久対応検討"]
+
+  %% その他
+  W5 --> W6["Quota/LimitRange確認"]
+  W7 -->|Yes| W8["dig, curl, tcpdump, corednsログ"]
+  W7 -->|No| I["調査結果の記録・恒久対策へ"]
+
+  %% スタイル
+  classDef cmdBox fill:#f7f7f7,stroke:#999,stroke-width:1px,font-size:12px;
+  classDef warn fill:#fff3cd,stroke:#ffecb5,stroke-width:1px;
+  classDef good fill:#d1e7dd,stroke:#badbcc,stroke-width:1px;
+  class NODES,CLUSTER,ETCD,PENDING cmdBox;
+  class Q1,Q2,Q3,Q4 warn;
+  class H good;
