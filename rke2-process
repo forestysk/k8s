@@ -1,0 +1,101 @@
+コンポーネント                  |  管理方法                                                      |  停止時の挙動                                                  |  復旧方法                                                                                                                                  |  判定コマンド・出力                                                                        |  自動復旧                    |  備考                                      
+-------------------------+------------------------------------------------------------+----------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------+--------------------------+------------------------------------------
+kube-apiserver           |  Static Pod（/var/lib/rancher/rke2/agent/pod-manifests/）    |  kubeletが消失を検知して再生成を試みるが、環境により復旧しないケースあり（issue #7616報告）  |  手動復旧時はsystemctl restart rke2-serverまたはPod削除（kubectl delete pod kube-apiserver-<node>）                                                 |  kubectl get pods -n kube-system -l component=kube-apiserverでRunningに戻るか確認        |  条件付き自動（異常時は手動）          |  kubeletが停止を検知してもstatic Podが再起動しないバグがありうる
+kube-controller-manager  |  Static Pod                                                |  kubeletが自動再生成                                           |  自動復旧                                                                                                                                  |  kubectl get pods -n kube-system -l component=kube-controller-managerでRunning確認   |  自動                      |  復旧に数秒〜十数秒                               
+kube-scheduler           |  Static Pod                                                |  kubeletが自動再生成                                           |  自動復旧                                                                                                                                  |  kubectl get pods -n kube-system -l component=kube-scheduler                      |  自動                      |  Controller Managerと似た挙動                 
+etcd                     |  Static Pod + data格納/var/lib/rancher/rke2/server/db/etcd/  |  kubeletが再生成。ただしデータ破損時は自動復旧不可                            |  systemctl stop rke2-server→rke2 server --cluster-reset --cluster-reset-restore-path=/path/to/snapshot→systemctl start rke2-serverで復旧  |  kubectl get componentstatusまたはkubectl get pods -n kube-system -l component=etcd  |  自動（プロセス死のみ）／手動（データ破損時）  |  snapshotからの手動復旧手順を要する                   
+
+追加で確認すべき項目
+systemctl status rke2-server：RKE2サービス全体の稼働確認（自動再起動設定あり）​
+
+journalctl -u rke2-server -f：制御プレーンの再起動ログ確認
+
+kubectl get node：全ノードのReady/NotReady状態による総合的な判断
+
+kubectl get pods -A：control-plane Namespace全体のPod復旧確認
+
+自動復旧の仕組み
+RKE2はsystemdで管理されており、/etc/systemd/system/rke2-server.serviceにはRestart=alwaysが設定されているため、rke2-serverプロセスが死んだ場合は自動再起動する。​
+
+ただし、Static Pod（特にkube-apiserver）の再生成はkubelet依存であり、場合によっては自動復旧しないため手動介入が必要なケースがある。​
+
+したがって、RKE2のcontrol-planeでは基本的に自動復旧機構が備わっていますが、etcdのデータ破損やapiserverの再生成不全時のみ手動操作による復旧が必要です。
+
+
+
+
+
+コンポーネント                  |  管理方法                                                    |  停止時の挙動                                        |  復旧方法                                                                                |  判定コマンド・出力                                                              |  自動復旧                                    |  備考                                               
+-------------------------+----------------------------------------------------------+------------------------------------------------+--------------------------------------------------------------------------------------+-------------------------------------------------------------------------+------------------------------------------+---------------------------------------------------
+kube-apiserver           |  Static Pod（kubelet監視）                                   |  kubeletが再生成を試みるが、まれに再生成されない問題あり（issue #7616）  |  kubectl delete pod kube-apiserver-* -n kube-systemまたはsystemctl restart rke2-server  |  kubectl get pods -n kube-system -l component=kube-apiserverでRunning確認  |  条件付き自動                                  |  kubelet・containerd依存                             
+kube-controller-manager  |  Static Pod                                              |  kubeletが自動再生成                                 |  自動復旧                                                                                |  kubectl get pods -n kube-system -l component=kube-controller-manager   |  自動                                      |  再起動後数秒～十数秒で復旧                                    
+kube-scheduler           |  Static Pod                                              |  kubeletが検知して自動再生成                             |  自動復旧                                                                                |  kubectl get pods -n kube-system -l component=kube-scheduler            |  自動                                      |  コントローラと似た挙動                                      
+etcd                     |  Static Pod + 永続データ/var/lib/rancher/rke2/server/db/etcd  |  kubeletがPodを再生成。ただしデータ破損時は自動復旧不可              |  rke2 server --cluster-reset --cluster-reset-restore-path=<snapshot>または再スナップショット復旧   |  kubectl get componentstatusもしくは etcd Pod ステータス                         |  プロセス死: 自動／データ破損: 手動                     |  snapshot復旧ガイド参照                                  
+kubelet                  |  rke2がsupervise（監視・再起動）                                  |  rke2が自動再起動を試みる                                |  systemctl restart rke2-server（またはrke2-agenton Worker）                               |  systemctl status rke2-server出力でkubelet再起動確認                            |  自動                                      |  rke2がkubeletをspawn・監視するため単独停止不可                  
+containerd               |  rke2がspawn（子プロセス）                                       |  終了するとrke2も終了する（rke2が依存）                       |  systemctl restart rke2-server（containerd再起動を含む）                                     |  systemctl status rke2-serverまたはctr containers list                     |  半自動（rke2再起動により）                         |  containerd-shimはcontainerごとに作成され、shim死滅時は該当Pod再生成
+containerd-shim          |  containerdにより生成                                         |  個々のコンテナプロセスが終了すると自動的に再生成または削除                 |  kubeletがPod再作成                                                                      |  `ps -ef                                                                |  grep containerd-shimまたはctr tasks list`  |  自動                                               
+
+
+補足 – プロセスと関係性
+rke2-server
+ ├── containerd
+ │    └── containerd-shim（Podごと）
+ └── kubelet
+      ├── kube-apiserver (Static Pod)
+      ├── kube-controller-manager
+      ├── kube-scheduler
+      └── etcd
+
+
+状況判定・確認コマンド整理
+systemctl status rke2-server：全体稼働確認
+
+journalctl -u rke2-server -f：関連ログ確認
+
+kubectl get nodes：ノード状態（Ready/NotReady）
+
+kubectl get pods -A：全Pod復旧検証
+
+ctr containers list / crictl ps：containerdレベルの確認
+
+自動復旧まとめ
+systemdレイヤー：Restart=always により、rke2-serverがプロセス死時に自動再起動
+
+rke2内部レイヤー：rke2がkubeletとcontainerdをspawn・監視し内部再起動
+
+kubeletレイヤー：Static Podを自動再生成
+
+例外：etcdデータ破損および、kube-apiserverの再生成不全は手動対応が必要
+
+これにより、通常はすべてのプロセスが階層的に自動再起動されますが、containerdやStatic Podの障害が複合した場合のみsystemctl restart rke2-serverを明示的に実行するのが最も安全です。
+
+
+プロセス                     |  1台停止時                                                        |  2台停止時                                         |  3台停止時                          |  復旧方法・確認                                                         |  備考                                 
+-------------------------+---------------------------------------------------------------+------------------------------------------------+---------------------------------+------------------------------------------------------------------+-------------------------------------
+rke2-server              |  クラスタは稼働継続。ただし該当ノード上のPod状態がクラスタと同期しなくなる（CNIやiptables設定がドリフト）  |  API応答が断続的になる場合あり（NetworkPolicy・Pod作成に失敗報告あり）  |  全API停止、etcdクォーラム喪失、クラスタ操作不能    |  1台ずつ順次systemctl start rke2-serverで復旧。kubectl get nodesでReady確認  |  プロセス停止中もPod自体は実行中（RKE2設計上の最小影響）    
+kubelet                  |  該当ノードがNotReady。Pod再作成されず孤立                                   |  他ノードのスケジューリング負荷増大。DaemonSet Podが減少            |  全ノードNotReady、API応答は継続（etcd生存）  |  kubelet単独再起動（systemctl restart rke2-server）で自動的に再spawn          |  kubeletがrke2下にあり単独再起動不可（rke2再起動に依存）
+etcd                     |  残り2ノードでクォーラム維持。影響小                                           |  クォーラム喪失し全API ReadOnlyまたは停止                    |  全データストア停止。クラスタ不動               |  etcd snapshotで1台リストア→2台再参加                                      |  etcdリーダー不在でAPI不応答となる               
+kube-apiserver           |  他ノードのapiserverで継続稼働                                          |  LB構成によりAPI遅延、failoverしない場合部分停止                |  全API停止                         |  該当Pod自動再起動（Static Pod管理）                                        |  kubeletが動いていれば自動復旧可能               
+kube-controller-manager  |  自動再起動、影響軽微                                                   |  一時的に一部controller停止（例: Deployment管理遅延）         |  cluster-level controllerすべて停止  |  自動再生成                                                           |  通常は自動復旧                            
+kube-scheduler           |  1台でも稼働していればスケジュール継続                                          |  スケジュール断続的停止                                   |  新規Podスケジュール全停止                 |  Static Pod自動再起動                                                 |  ワークロード実行には影響軽微                     
+containerd               |  kubelet再起動により再生成                                             |  Pod停止→kubeletが新規生成（他ノードで動作継続）                 |  ワークロード全停止                      |  systemctl restart rke2-server                                   |  containerd死亡時はPodが瞬断する             
+containerd-shim          |  該当Podのみ終了 → kubeletにより再生成                                    |  該当ノードで複数Pod消失                                 |  すべてのPod消失                      |  自動再生成（kubelet）                                                  |  Podごとにshim生成／破棄                    
+
+
+影響の体系的まとめ
+1台停止時：クラスター全体は継続稼働。停止ノード上のPodやネットワークに軽微な影響。
+
+2台停止時：etcdクォーラム喪失によりAPIレベルで停止。Podはそのまま動作するが管理不能。
+
+3台停止時：全制御面ダウン。etcdとAPIともに停止し、Workerのみ分離稼働。復旧にはsnapshotからの手動リストアが必要。
+
+確認と復旧時の監視点
+kubectl get nodes：ノード稼働確認
+
+kubectl get componentstatus：API・etcd・controller/schedulerの正常性確認
+
+journalctl -u rke2-server -f：復旧進行ログ
+
+etcdctl endpoint health：etcdクォーラム状態
+
+要点として、rke2-serverプロセスが1台停止しただけでも該当ノード上のCNIやPod同期問題が発生しうるため、単なるプロセス停止ではなくノード単位での再起動（または計画的シャットダウン）が推奨されます 。​
